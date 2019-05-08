@@ -1,0 +1,246 @@
+---
+title: "Air Crash Scraping"
+author: "George Yang"
+date: "2/11/2019"
+output: pdf_document
+---
+
+```{r md_setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(include = TRUE)
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60), tidy = TRUE)
+require(tidyverse)
+require(lubridate)
+require(knitr)
+require(XML)
+require(rvest)
+require(utf8)
+
+
+options(scipen = 999)
+```
+
+# Data 
+## 1. 
+```{r}
+dat.r <- xmlParse("data/AviationData.xml")
+l1 <- xmlToList(dat.r)
+df <- data.frame(matrix(unlist(l1), nrow = 82712, byrow = T))
+
+df1 <- read.csv("data/Airplane_Crashes_and_Fatalities_Since_1908.csv")
+```
+
+```{r}
+colnames(df) <- colnames(read.csv("data/ntsb_fields.csv"))
+```
+
+## Scraping data from planecrashinfo.com
+###Step 1, scraping summary data
+```{r}
+crash.initial <- read_html("http://planecrashinfo.com/1920/1920.htm")
+
+df2 <- html_table(crash.initial, fill = T)[[1]]
+
+for (i in 1921:2019) {
+  crash.temp <- read_html(paste0("http://planecrashinfo.com/", i, "/", i, ".htm"))
+  df2.temp <- html_table(crash.temp, fill = T)[[1]]
+  df2 <- rbind(df2, df2.temp)
+}
+
+# colnames(df2) <- df2[1, ]
+# df2 <- df2[which(df2$Date != "Date"), ]
+# 
+# df2 <- df2 %>% mutate(year = substr(Date, 8, 11), month = substr(Date, 4, 6), day = substr(Date, 1, 2))
+# 
+# write.csv(df2, "planecrashinfo.csv")
+
+df2 <- read.csv("data/planecrashinfo.csv", header = T)
+```
+
+### Step 2, scraping detailed data
+```{r}
+yearcase.tmp <- df2 %>% group_by(year) %>% summarise(n()) %>% as.data.frame()
+
+# all accidents before year 1920 are catagorized as year 1920 on the website
+yearcase <- yearcase.tmp[10:109, ]
+yearcase[1, 2] <- sum(yearcase.tmp[1:10, 2])
+
+# scraping detailed data
+# initialize the data frame with col names
+detail.initial <- read_html("http://planecrashinfo.com/1920/1920-1.htm")
+
+df3 <- data.frame(matrix(ncol = 13, nrow = 5801))
+coln.raw <- t(html_table(detail.initial, fill = T)[[1]])[1, -1]
+coln <- gsub(" ", "", gsub(":","", coln.raw))
+coln[7] <- "Type"
+colnames(df3) <- coln
+
+k <- 1
+for (i in 1920:2019) {
+  for (j in 1:yearcase[i-1919, 2]) {
+    detail.temp <- read_html(paste0("http://planecrashinfo.com/", i, "/", i, "-", j, ".htm"))
+    df3[k, ] <- t(html_table(detail.temp, fill = T)[[1]])[2, -1]
+    k <- k + 1
+  }
+  print(i)
+}
+```
+
+# clean the dataset
+```{r}
+df3$Date <- as.Date(df3$Date, format = "%B %d, %Y")
+
+# write.csv(df3, "crash_detail.csv")
+```
+
+#
+```{r}
+df3 <- read.csv("data/crash_detail.csv", header = T, stringsAsFactors = F)
+
+# Time column, create a column with a binary option of being exact time or estimated (circa), change ? to NA
+df3$Date[which(df3$Date == "?")] <- NA 
+
+```
+
+# scraping from aviation-safety.net
+```{r}
+url <- "http://aviation-safety.net/database/dblist.php?Year=1962"
+ 
+# or in one go
+test <- url %>% read_html() %>% 
+  html_nodes("nobr a") %>% html_attr('href')
+
+urlnew <- paste0("http://aviation-safety.net/", test[4])
+tmp1 <- urlnew %>% read_html() %>% html_nodes("span , td") %>% html_text()
+
+
+######
+
+# write a function to trim the scraped dataset
+reduce.col <- function(df) {
+  discard.col <- c()
+  for (k in 1:dim(df)[2]) {
+    if (sum(!is.na(df[ ,k])) <= 20) {
+      discard.col <- c(discard.col, k)
+    }
+  }
+  df.new <- df[ ,-discard.col]
+  return(df.new)
+}
+
+
+#######
+#batch 1: 1919 - 1954, badlinks: 15
+#batch 2: 1955 - 1969, badlinks: 2
+#batch 3: 1970 - 1984, badlinks: 0
+#batch 4: 1985 - 1999, badlinks: 0
+#batch 5: 2000 - 2019, badlinks: 1
+
+#######
+
+# change batch name, from 1 to 5
+df5_batch5 <- data.frame()
+
+badlinks <- 0
+
+for (yr in 2000:2019) {
+  url.init <- paste0("http://aviation-safety.net/database/dblist.php?Year=", yr)
+  
+  pages.tmp <- url.init %>% read_html() %>% html_nodes(".pagenumbers") %>% html_text()
+  
+  if (pages.tmp == "") {
+    pages <- 1
+  }
+  
+  else {
+    pages <- pages.tmp %>% strsplit("") %>% unlist() %>% as.numeric() %>% max(na.rm = T)
+  }
+  
+  for (pg in 1:pages) {
+    url1 <- paste0(url.init, "&lang=&page=", pg)
+      
+    links <- url1 %>% read_html() %>% html_nodes("nobr a") %>% html_attr('href')
+    
+    for (link.num in 1:length(links)) {
+      url.tmp <- paste0("http://aviation-safety.net/", links[link.num])
+      
+      # node selection option 1: .captionhr:nth-child(7) , span , td, all even number of elements (in other words, all are convertable to dataframe)
+      # node selection option 2: span , td
+      
+      if (is.na(tryCatch(read_html(url.tmp), error = function(error) {NA}))) {
+        badlinks <- badlinks + 1
+      }
+      
+      else {
+        
+        # tryout node selection: .captionhr:nth-child(7) , span , td
+        # .captionhr:nth-child(7) , span , .caption+ td , .caption
+        
+        record.text.tmp <- url.tmp %>% read_html() %>% html_nodes(".captionhr:nth-child(7) , span , .caption+ td , .caption") %>% html_text()
+        
+        # Sometimes a title of "Accident investigation:" gets tagged on at the end, causing the total number of objects to be odd. In that case, get rid of the last one and leave the total number to be even.
+        if (length(record.text.tmp) %% 2 == 1) {
+          record.text.tmp <- record.text.tmp[-length(record.text.tmp)]
+        }
+        
+        # collapse the vector of text to be header and information.
+        new.record <- as.data.frame(matrix(record.text.tmp, nrow = 2, byrow = F), stringsAsFactors = FALSE)
+      
+        # assign the first row as header and second row as a record
+        colnames(new.record) <- new.record[1, ]
+        new.record <- new.record[-1, ]
+      
+        # bind the new record to the current dataframe, change name, from 1 to 5
+        df5_batch5 <- bind_rows(new.record, df5_batch5)
+      }
+    }
+  }
+  print(yr)
+}
+
+```
+
+```{r}
+# df51 <- reduce.col(df5_batch1)
+# df52 <- reduce.col(df5_batch2)
+# df53 <- reduce.col(df5_batch3)
+# df54 <- reduce.col(df5_batch4)
+# df55 <- reduce.col(df5_batch5)
+# 
+# df5 <- bind_rows(df51, df52, df53, df54, df55)
+# 
+# write.csv(df5, "ANData.csv", row.names = F)
+
+df5 <- read.csv("ANData.csv", stringsAsFactors = F)
+```
+
+# Further cleaning
+```{r}
+testdf <- df5
+
+# eliminate empty record (1 row)
+testdf <- testdf[which(is.na(testdf$Status.) == FALSE), ]
+
+df6 <- testdf %>% select(1:28)
+
+coln.tmp <- colnames(df6)
+
+coln.tmp <- gsub('.{1}$', '', coln.tmp)
+
+coln.tmp <- gsub('\\Q...\\E', '.', coln.tmp)
+
+colnames(df6) <- coln.tmp
+
+# fix Status
+df6$Status <- gsub("\\- \\(No safety board investigation\\)", "No investigation", df6$Status)
+df6$Status <- gsub("z", "", df6$Status)
+df6$Status <- gsub("^$", NA, df6$Status)
+
+# fix Date
+# retain year information for incomplete records, change date to standard format, create column for weekday
+df6 <- df6 %>% mutate(Year = gsub(".*(?=.{4}$)", "", dates, perl = T), Date = as.Date(Date, format = "%A %d %B %Y"), Weekday = weekdays(Date))
+
+#
+#write.csv(df6, "ANData_processed.csv", row.names = F)
+```
+
