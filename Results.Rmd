@@ -172,7 +172,7 @@ bearing_key <- read.csv("data/directions.csv")
 df.civil <- left_join(df.civil, bearing_key)
 
 # 2500 limit per day
-#register_google(key = "AIzaSyDnSL2fAi5Z71lSE2qqccutQAOj-NMQ3HQ")
+#register_google(key = "*************")
 
 #coord1 <- geocode(df.civil$Location[1:2200])
 #coord2 <- geocode(df.civil$Location[2201:4400])
